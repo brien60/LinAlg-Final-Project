@@ -227,8 +227,9 @@ class ChannelSlicedSVD(nn.Module):
         return approx_feature_maps
     
 k = 4
+CRs = [0.6, 1.0, 1.0, 1.0] # 0.18% 2.41%
 CRs = [1.0, 1.0, 1.0, 0.44] # 23.83% 0.88%
-# js = [64, 128, 256, 320]
+# js = [64, 128, 128, 128] # 48.36% 5.33%
 
 for name, module in model.named_modules():
     if (isinstance(module, nn.Conv2d) and (not "downsample" in name) and (not name == "conv1")):
