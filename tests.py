@@ -2,10 +2,9 @@ import torch
 from torch import nn
 import torchvision.models as models
 from torchvision import transforms as T
+from torchvision.models._utils import IntermediateLayerGetter
 from datasets import load_dataset
-from PIL import Image
 
-import numpy as np
 import matplotlib.pyplot as plt
 
 from tqdm import tqdm
@@ -18,6 +17,9 @@ model = models.resnet18(weights=weights)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = model.to(device)
+
+new_model = IntermediateLayerGetter(model, return_layers={"layer1": "layer1"})
+
 
 print("No Compression")
 summary(model, input_size=(1, 3, 224, 224))
@@ -86,6 +88,9 @@ def evaluate(model):
             input = input.to(device)
             t = time()
             pred = model(input).argmax(dim=1).item()
+            hooked_output = new_model(input)
+            # print("hooked outp    ut: ", hooked_output)
+            break
             total_time += time() - t
 
             correct += (label == pred)
@@ -159,7 +164,7 @@ total_params = sum(param.numel() for param in model.parameters())
 print(f"total parameters post-compression (vanilla): {total_params}")
 print(f"Parameter reduction (vanilla): {100*(original_num_params - total_params) / original_num_params:.2f}%")
 
-evaluate(model=model)
+# evaluate(model=model)
 
 
 
