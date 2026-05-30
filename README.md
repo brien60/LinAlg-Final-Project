@@ -7,4 +7,4 @@ source linear/Scripts/activate
 ```
 
 ### Install the required libraries:
-` pip install torch torchvision torchinfo datasets matplotlib tqdm `
+` pip install torch torchvision torchinfo datasets matplotlib tqdm seaborn`

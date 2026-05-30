@@ -2,10 +2,10 @@ import torch
 from torch import nn
 import torchvision.models as models
 from torchvision import transforms as T
-from torchvision.models._utils import IntermediateLayerGetter
 from datasets import load_dataset
 
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 from tqdm import tqdm
 from torchinfo import summary
@@ -18,11 +18,9 @@ model = models.resnet18(weights=weights)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = model.to(device)
 
-new_model = IntermediateLayerGetter(model, return_layers={"layer1": "layer1"})
+original_num_params = 11689512
+verbose = False
 
-
-print("No Compression")
-summary(model, input_size=(1, 3, 224, 224))
 
 ds = load_dataset("ILSVRC/imagenet-1k", split="validation", streaming=True)
 
@@ -38,10 +36,12 @@ transform = T.Compose([
 ])
 
 
-total_params = sum(param.numel() for param in model.parameters())
-original_num_params = total_params
-print(f"total parameters pre-compression: {original_num_params}")
+activation = {}
+fms = []
 
+def hook(module, input, output):
+    activation["feature_map"] = output
+    
 
 def weight_svd(W: torch.Tensor, j: float) -> tuple[torch.Tensor, torch.Tensor]:
     f, c, k_h, k_w = W.shape
@@ -69,6 +69,12 @@ def replace_conv(model, name, new_conv):
         parent = getattr(parent, part)
     setattr(parent, parts[-1], new_conv)
 
+def print_param_stats(model):
+    total_params = sum(param.numel() for param in model.parameters())
+    print(f"total parameters: {total_params}")
+    print(f"Parameter reduction: {100*(original_num_params - total_params) / original_num_params:.2f}%")
+
+    
 def evaluate(model):
 
     total = 0
@@ -88,9 +94,13 @@ def evaluate(model):
             input = input.to(device)
             t = time()
             pred = model(input).argmax(dim=1).item()
-            hooked_output = new_model(input)
-            # print("hooked outp    ut: ", hooked_output)
-            break
+            
+            if label == 620:
+                feature_maps = activation["feature_map"]
+                fms.append(feature_maps)
+
+                break
+
             total_time += time() - t
 
             correct += (label == pred)
@@ -108,6 +118,13 @@ def evaluate(model):
     print(f"Accuracy drop: {69.7 - acc:.2f}%")
 
 
+print("No Compression")
+
+if verbose: summary(model, input_size=(1, 3, 224, 224))
+    
+print_param_stats(model)
+model.layer4[0].conv1.register_forward_hook(hook)
+evaluate(model)
 
 # vanilla SVD
 print("\n\nVanilla SVD")
@@ -120,12 +137,12 @@ CRs = [1.0, 1.0, 1.0, 0.6] # parameter reduction: 22.91%, acc drop: 2.64%
 for name, module in model.named_modules():
     if (isinstance(module, nn.Conv2d) and (not "downsample" in name) and (not name == "conv1")):
         parts = name.split(".")
-        # print(name, module.weight.shape)
 
         layer_num = int(parts[0][-1])
         compression_ratio = CRs[layer_num-1]
 
-        if (compression_ratio == 1.0): continue  
+        if (compression_ratio == 1.0): continue
+        print(name, module.weight.shape)
 
         W = module.weight
 
@@ -158,13 +175,11 @@ for name, module in model.named_modules():
         # print(torch.dist(W, W_approx).item())
         # W_approx = torch.reshape(W_approx, (f, c, k_h, k_w))
 
-summary(model, input_size=(1, 3, 224, 224))
+if verbose: summary(model, input_size=(1, 3, 224, 224))
 
-total_params = sum(param.numel() for param in model.parameters())
-print(f"total parameters post-compression (vanilla): {total_params}")
-print(f"Parameter reduction (vanilla): {100*(original_num_params - total_params) / original_num_params:.2f}%")
-
-# evaluate(model=model)
+print_param_stats(model)
+model.layer4[0].conv1.register_forward_hook(hook)
+evaluate(model=model)
 
 
 
@@ -239,12 +254,12 @@ CRs = [1.0, 1.0, 1.0, 0.44] # 23.83% 0.88%
 for name, module in model.named_modules():
     if (isinstance(module, nn.Conv2d) and (not "downsample" in name) and (not name == "conv1")):
         parts = name.split(".")
-        # print(name, module.weight.shape)
 
         layer_num = int(parts[0][-1])
         compression_ratio = CRs[layer_num-1]
 
         if (compression_ratio == 1.0): continue  
+        print(name, module.weight.shape)
 
         W = module.weight
 
@@ -256,10 +271,43 @@ for name, module in model.named_modules():
         W_approx = ChannelSlicedSVD(j, k, module).to(device)
         replace_conv(model, name, W_approx)
 
-summary(model, input_size=(1, 3, 224, 224))
+if verbose: summary(model, input_size=(1, 3, 224, 224))
 
-total_params = sum(param.numel() for param in model.parameters())
-print(f"total parameters post-compression (sliced): {total_params}")
-print(f"Parameter reduction (sliced): {100*(original_num_params - total_params) / original_num_params:.2f}%")
 
+print_param_stats(model)
+model.layer4[0].conv1.register_forward_hook(hook)
 evaluate(model=model)
+
+f = 18
+   
+fm_orig = fms[0][0][f]
+fm_svd = fms[1][0][f]
+fm_cs = fms[2][0][f]
+
+diff_svd = torch.sub(fm_svd, fm_orig)
+diff_cs = torch.sub(fm_cs, fm_orig)
+
+# d1 = diff_svd.norm().item() / fm_orig.norm().item()
+# d2 = diff_cs.norm().item() / fm_orig.norm().item()
+# print(f"{f}: {d1}, {d2}")
+
+diff_svd = diff_svd.detach().cpu().numpy().__abs__()
+diff_cs = diff_cs.detach().cpu().numpy().__abs__()
+
+# vmin = min(diff_svd.min(), diff_cs.min())
+# vmax = max(diff_svd.max(), diff_cs.max())
+vmin = 0
+vmax = 1
+
+plt.figure(figsize=(16, 6))
+
+plt.subplot(121)
+plt.title("|SVD - Original|")
+sns.heatmap(diff_svd, annot=True, cmap="viridis", vmin=vmin, vmax=vmax)
+
+plt.subplot(122)
+plt.title("|CS - Original|")
+sns.heatmap(diff_cs, annot=True, cmap="viridis", vmin=vmin, vmax=vmax)
+
+
+plt.savefig("feature_map_diff.png")
